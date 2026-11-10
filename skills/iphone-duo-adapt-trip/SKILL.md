@@ -1,5 +1,5 @@
 ---
-name: iphone-duo-adapt
+name: iphone-duo-adapt-trip
 description: 把直板机（普通 iPhone）Figma 设计稿适配成 iPhone DUO 折叠屏稿（01 外屏 outerPortrait / 02 内屏竖屏 innerPortrait / 03 内屏横屏 innerLandscape）。先给推荐方案和按开发难度降级的备选方案（通常是通栏适配）示意图，设计师确认后生成适配稿，放在直板机稿旁边或设计师指定的位置。Use when someone shares a Figma frame link and asks to adapt / 适配 it to iPhone DUO, 折叠屏, foldable, outer/inner screen, or to generate / 输出 DUO 适配稿 or 适配方案.
 ---
 
