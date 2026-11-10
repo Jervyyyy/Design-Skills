@@ -97,7 +97,8 @@ async function sysPart(name, h) {
 
 // ---------- source helpers ----------
 const inner = (n) => n.width - (n.paddingLeft || 0) - (n.paddingRight || 0);
-function pathOf(node) { const p = []; let n = node; while (n.id !== src.id) { const par = n.parent; if (!par || par.type === "PAGE") return null; p.unshift(par.children.indexOf(n)); n = par; } return p; }
+const shown = (n, top) => { for (; n && n !== top; n = n.parent) if (!n.visible) return false; return true; };
+function pathOf(node, root = src) { const p = []; let n = node; while (n.id !== root.id) { const par = n.parent; if (!par || par.type === "PAGE") return null; p.unshift(par.children.indexOf(n)); n = par; } return p; }
 function at(root, p) { let n = root; for (const i of p) { if (!n || !("children" in n)) return null; n = n.children[i]; } return n || null; }
 const pathCache = {};
 async function srcPath(id) { if (!(id in pathCache)) { const n = await figma.getNodeByIdAsync(id); pathCache[id] = n ? pathOf(n) : null; } return pathCache[id]; }
@@ -113,7 +114,27 @@ async function detect(f) {
   const bgs = kids.filter((c) => c !== nav && c !== bottom && c.layoutPositioning === "ABSOLUTE" && Math.abs(c.width - rootW) < 1.5);
   const flow = kids.filter((c) => c !== nav && c !== status && c !== bottom && c.layoutPositioning !== "ABSOLUTE");
   const containers = flow.filter((c) => c.type === "FRAME" && c.layoutMode === "VERTICAL" && c.paddingLeft > 0 && c.paddingLeft === c.paddingRight);
-  return { nav, status, bottom, bgs, flow, containers };
+  // root-level instances that act as content containers (e.g. a chat turn published as a component); their padding is an instance override
+  const boxes = flow.filter((c) => c.type === "INSTANCE" && c.layoutMode && c.layoutMode !== "NONE" && c.paddingLeft > 0 && c.paddingLeft === c.paddingRight && (c.layoutSizingHorizontal === "FILL" || Math.abs(c.width - inner(f)) <= 1.5));
+  return { nav, status, bottom, bgs, flow, containers, boxes };
+}
+// walkNoInst never enters instances: record fixed-width sublayers that span their parent as { instancePath, suffix } of their outermost
+// instance, so they can be re-resolved by id after the instance re-lays out and set to FILL (an allowed instance override)
+function instFills(inst, root) {
+  const pre = "I" + inst.id + ";", instancePath = pathOf(inst, root), out = [];
+  if (!instancePath) return out;
+  for (const n of inst.findAll((n) => n.width >= 160 && n.parent.layoutMode === "VERTICAL")) {
+    const p = n.parent, w = inner(p);
+    if (p.counterAxisSizingMode === "FIXED" && n.layoutPositioning !== "ABSOLUTE" && n.layoutSizingHorizontal === "FIXED" && n.width >= w - 4 && n.width <= w + 1.5 && n.id.startsWith(pre) && shown(n, inst))
+      out.push({ instancePath, suffix: n.id.slice(pre.length), name: n.name });
+  }
+  return out;
+}
+async function toFill(c) {
+  try {
+    if (c.type === "TEXT") { if (!(await loadTextFonts(c))) return false; if (c.textAutoResize === "WIDTH_AND_HEIGHT") c.textAutoResize = "HEIGHT"; }
+    c.layoutSizingHorizontal = "FILL"; return true;
+  } catch (e) { return false; }
 }
 function pageMargin(W, lt) { if (W < 600) return 20; if (W < 834) return lt === "fullBleed" ? 32 : 24; if (W < 1184) return lt === "fullBleed" ? 40 : 32; return Math.round((W - 1120) / 2); }
 function cloneSource() {
@@ -137,11 +158,15 @@ async function adapt(cfg, mode, host) {
   const secondary = split ? (await Promise.all((split.secondaryIds || []).map((id) => inClone(f, id)))).filter(Boolean) : [];
   const d = await detect(f);
   const isAL = f.layoutMode && f.layoutMode !== "NONE";
-  const oldMargin = isAL && f.paddingLeft > 0 ? f.paddingLeft : d.containers[0] ? d.containers[0].paddingLeft : null;
+  const c0 = d.containers[0] || d.boxes[0];
+  const oldMargin = isAL && f.paddingLeft > 0 ? f.paddingLeft : c0 ? c0.paddingLeft : null;
+  // only instances whose content edge sits on the page margin (padding = margin, not an inner card padding)
+  const boxes = d.boxes.filter((c) => c.paddingLeft === oldMargin && Math.abs(c.x + c.paddingLeft - oldMargin) <= 1);
 
   // nodes that fill their parent today must keep filling it after the width change
-  const fills = [];
+  const fills = [], iFills = [];
   walkNoInst(f, (c) => {
+    if (c.type === "INSTANCE" && c !== d.nav && c !== d.status) iFills.push(...instFills(c, f));
     const p = c.parent;
     if (!p || p.layoutMode !== "VERTICAL" || c.layoutPositioning === "ABSOLUTE" || c.layoutSizingHorizontal !== "FIXED" || c === d.nav) return;
     const w = inner(p);
@@ -159,8 +184,16 @@ async function adapt(cfg, mode, host) {
   }
   for (const b of d.bgs) { b.resize(vb === "A" ? cW : W, b.height); b.x = 0; }
   for (const c of d.containers) if (c.paddingLeft === oldMargin) { c.paddingLeft = margin; c.paddingRight = margin; }
-  if (oldMargin != null && oldMargin !== margin) applied.push(`${F.key}: 页边距 ${oldMargin} → ${margin}`);
-  for (const c of fills) { try { if (c.type === "TEXT" && !(await loadTextFonts(c))) continue; if (c.type === "TEXT" && c.textAutoResize === "WIDTH_AND_HEIGHT") c.textAutoResize = "HEIGHT"; c.layoutSizingHorizontal = "FILL"; } catch (e) {} }
+  for (const c of boxes) { c.paddingLeft = margin; c.paddingRight = margin; }
+  if (oldMargin != null && oldMargin !== margin) applied.push(`${F.key}: 页边距 ${oldMargin} → ${margin}${boxes.length ? `（含组件实例容器 ${boxes.map((c) => c.name).join("、")}）` : ""}`);
+  for (const c of fills) await toFill(c);
+  const iNames = []; let iN = 0;
+  for (const r of iFills) {
+    const ci = at(f, r.instancePath);
+    const n = ci && ci.type === "INSTANCE" ? await figma.getNodeByIdAsync("I" + ci.id + ";" + r.suffix) : null;
+    if (n && (await toFill(n))) { iN++; if (!iNames.includes(r.name)) iNames.push(r.name); }
+  }
+  if (iN) applied.push(`${F.key}: 组件实例内 ${iN} 个撑满父级的固定宽图层改为 FILL（${iNames.slice(0, 4).join("、")}${iNames.length > 4 ? " 等" : ""}）`);
   if (d.bottom) {
     if (d.bottom.layoutPositioning === "ABSOLUTE" || !isAL) { d.bottom.x = 0; d.bottom.resize(cW, d.bottom.height); d.bottom.constraints = { horizontal: "STRETCH", vertical: "MAX" }; }
     if (/tab\s*bar|全局导航|global/i.test(d.bottom.name)) warn("全局导航是系统控件：DUO 上按系统尺寸/方向显示（可能变为右侧竖排），稿中仅示意");

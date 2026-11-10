@@ -27,7 +27,7 @@ node scripts/check.mjs
 
 ## 流程（agent 路径）
 
-**调用方式**：读出脚本全文，只替换第 4 行左右的 `const PARAMS = ...;` 这一行（单行 JSON），整段作为 `use_figma` 的 `code`。脚本约 9k / 29k 字符，低于 50k 上限。
+**调用方式**：读出脚本全文，只替换第 4 行左右的 `const PARAMS = ...;` 这一行（单行 JSON），整段作为 `use_figma` 的 `code`。脚本约 9k / 32k 字符，低于 50k 上限。
 
 ### 1. 分析直板机稿（只读）
 
@@ -90,7 +90,7 @@ const PARAMS = {"sourceId":"1:2","mode":"final","target":{"nodeId":"1:1556"},"la
 
 ## 脚本自动做了什么
 
-克隆原稿（不改原稿）→ 窗口加宽到 466 / 669 / 951 → 内容避让 VB（根 paddingRight +84）→ 页边距按断点替换 → 原本撑满父级的固定宽节点改为 FILL → 标题栏换成 DUO 头部 → 按配置网格化 / 分栏 → 窄卡片图片 3:4 → 加 Vertical Bar（方式 A 再垫白条）或 Reserved Region → 标注与说明。
+克隆原稿（不改原稿）→ 窗口加宽到 466 / 669 / 951 → 内容避让 VB（根 paddingRight +84）→ 页边距按断点替换（含根层带页边距的组件实例容器）→ 原本撑满父级的固定宽节点改为 FILL（含组件实例内的子层）→ 标题栏换成 DUO 头部 → 按配置网格化 / 分栏 → 窄卡片图片 3:4 → 加 Vertical Bar（方式 A 再垫白条）或 Reserved Region → 标注与说明。
 
 ## Gotchas
 
@@ -100,6 +100,7 @@ const PARAMS = {"sourceId":"1:2","mode":"final","target":{"nodeId":"1:1556"},"la
 - **Pane controls 默认带业务按钮**（Controls slot 里的心形、邮件等），模板里是空 spacer；脚本会隐藏 `Controls`，只留摄像头 / 时间 / 信号。
 - **往自动布局里插入含文字的实例会报** `in appendChild: unloaded font "Trip-Inter Variable Medium"`：脚本先 `loadNodeFonts` 原稿和新实例的全部字体。
 - **聊天类页面根节点是底部对齐**（`primaryAxisAlignItems: MAX`），裁成一屏高时只露出页面底部。proposal 模式会强制顶部对齐；final 模式高度跟随内容，不受影响。
+- **内容包在组件实例里**（如聊天页上一轮对话 `Frame 2147203417` 是实例：VERTICAL、padding 12/12、FILL）：根层 FRAME 容器逻辑和 `walkNoInst` 都碰不到它，边距会停在 12、实例里 351 宽的卡片不随窗口加宽。脚本因此把根层在流内、`paddingLeft === paddingRight === 原边距`（内容边缘正好在原边距处）的实例也当容器改 padding；实例内（任意深度）可见、FIXED 宽、非绝对定位、宽 ≥ 160 且 ≥ 父级内宽 − 4、父级 VERTICAL 且 `counterAxisSizingMode = FIXED` 的子层，加宽前记成 `{ instancePath, suffix }`，加宽后用 `I<克隆实例 id>;<suffix>` 取回再设 `layoutSizingHorizontal = "FILL"`（实例子层允许这个覆盖）。改动写进适配说明卡。
 - **网格目标在组件实例内部时改不了布局**（实例子层不能改 layoutMode），会出警告，需要设计师手动处理或先 detach。
 - **3:4 规则只自动处理横向卡片里的图**（图在左、文字在右）；纵向卡片里的图只报警告，让设计师确认。
 - **浮层 / 提示条 / 对话框不会自动改**：按 `duo-rules.md` 第 2 节在说明里提醒。
@@ -118,4 +119,5 @@ const PARAMS = {"sourceId":"1:2","mode":"final","target":{"nodeId":"1:1556"},"la
 ## 已验证
 
 - 规范文件「Spec for AI」页，直板机稿「多目的地 - 首次进入」(`9821:71286`)：proposal → 方案板 `9924:27862`；final（推荐）→ `9926:28308`（右侧放置、真组件复用、Main–Support 分栏、对比项双列）。
+- 同页「单目的地 - 非首次进入」(`9821:71587`) / 「多目的地 - 非首次进入」(`9821:71826`)，首轮对话是组件实例：proposal → `10085:32361`，final → `10090:33313` / `10094:33789`；实例容器边距与实例内卡片（`Frame 2147203494`、`Card/City-Big` 的 `Rectangle`、`Feedback/OpinionGroup`）都撑满版心（342 / 621 / 803），无需手动修正。
 - 新建测试文件里的 mock 一级页（TabBar + 4 张横向酒店卡）：proposal（跨文件导入 NavigationBar、矢量复刻 VB / Reserved Region、2 列网格 + 3:4）和 final（`target` 指定 Section、单屏保持设备高度）。
